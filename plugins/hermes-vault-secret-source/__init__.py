@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from agent.secret_sources.base import ErrorKind, FetchResult, SecretSource, is_valid_env_name, run_secret_cli
 
@@ -37,6 +38,7 @@ class HermesVaultSource(SecretSource):
             return result
 
         bindings: list[str] = []
+        generic_bindings: list[tuple[str, str]] = []
         for env_name, ref in env_map.items():
             if not isinstance(env_name, str) or not is_valid_env_name(env_name):
                 result.error = f"Invalid environment variable name in secrets.hermes_vault.env: {env_name!r}"
@@ -46,7 +48,11 @@ class HermesVaultSource(SecretSource):
                 result.error = f"Invalid Hermes Vault reference for {env_name}."
                 result.error_kind = ErrorKind.REF_INVALID
                 return result
-            bindings.append(f"{env_name}={ref.strip()}")
+            clean_ref = ref.strip()
+            if _ref_service(clean_ref) == "generic":
+                generic_bindings.append((env_name, clean_ref))
+            else:
+                bindings.append(f"{env_name}={clean_ref}")
 
         binary = str(cfg.get("binary") or "hermes-vault")
         agent = str(cfg.get("agent") or "hermes")
@@ -54,48 +60,44 @@ class HermesVaultSource(SecretSource):
         timeout = float(_positive_int(cfg.get("timeout_seconds"), 30))
         extra_env = _extra_env(cfg, home_path)
         allow_env = sorted(self.protected_env_vars(cfg) | _vault_config_env_vars(cfg))
+        result.binary_path = Path(binary)
 
-        try:
-            proc = run_secret_cli(
-                [
-                    binary,
-                    "--no-banner",
-                    "secret-source",
-                    "fetch",
-                    "--agent",
-                    agent,
-                    "--ttl",
-                    str(ttl),
-                    "--format",
-                    "json",
-                    "--",
-                    *bindings,
-                ],
+        requests: list[tuple[str | None, list[str]]] = []
+        if bindings:
+            requests.append((None, bindings))
+        requests.extend(
+            (env_name, [f"HERMES_VAULT_SECRET={ref}"])
+            for env_name, ref in generic_bindings
+        )
+
+        for remap_env, request_bindings in requests:
+            partial = _fetch_bindings(
+                binary=binary,
+                agent=agent,
+                ttl=ttl,
+                timeout=timeout,
                 allow_env=allow_env,
                 extra_env=extra_env,
-                timeout=timeout,
+                bindings=request_bindings,
             )
-        except RuntimeError as exc:
-            result.error = str(exc)
-            result.error_kind = ErrorKind.TIMEOUT if "timed out" in str(exc).lower() else ErrorKind.BINARY_MISSING
-            result.binary_path = Path(binary)
-            return result
+            if remap_env is not None:
+                secret = partial.secrets.pop("HERMES_VAULT_SECRET", None)
+                if secret:
+                    partial.secrets[remap_env] = secret
+                partial.warnings = [
+                    warning.replace("HERMES_VAULT_SECRET", remap_env)
+                    for warning in partial.warnings
+                ]
+            _merge_fetch_result(result, partial)
 
-        result.binary_path = Path(binary)
-        try:
-            payload = json.loads(proc.stdout or "{}")
-        except json.JSONDecodeError:
-            result.error = "hermes-vault secret-source fetch returned malformed JSON."
-            result.error_kind = ErrorKind.INTERNAL
-            return result
-
-        _apply_payload_to_result(payload, result)
         if result.secrets:
+            if result.error:
+                result.warnings.append(result.error)
             result.error = None
             result.error_kind = None
         elif result.error is None:
-            result.error = _first_issue_message(payload) or f"hermes-vault exited {proc.returncode} without usable secrets."
-            result.error_kind = _first_issue_kind(payload) or ErrorKind.INTERNAL
+            result.error = "hermes-vault exited without usable secrets."
+            result.error_kind = ErrorKind.INTERNAL
         return result
 
     def protected_env_vars(self, cfg: dict):
@@ -117,6 +119,71 @@ class HermesVaultSource(SecretSource):
             "profile": {"description": "Optional HERMES_VAULT_PROFILE for the child process.", "default": None},
             "env": {"description": "Explicit ENV_VAR -> hv://service mapping.", "default": {}},
         }
+
+
+def _fetch_bindings(
+    *,
+    binary: str,
+    agent: str,
+    ttl: int,
+    timeout: float,
+    allow_env: list[str],
+    extra_env: dict[str, str],
+    bindings: list[str],
+) -> FetchResult:
+    result = FetchResult(binary_path=Path(binary))
+    try:
+        proc = run_secret_cli(
+            [
+                binary,
+                "--no-banner",
+                "secret-source",
+                "fetch",
+                "--agent",
+                agent,
+                "--ttl",
+                str(ttl),
+                "--format",
+                "json",
+                "--",
+                *bindings,
+            ],
+            allow_env=allow_env,
+            extra_env=extra_env,
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        result.error = str(exc)
+        result.error_kind = ErrorKind.TIMEOUT if "timed out" in str(exc).lower() else ErrorKind.BINARY_MISSING
+        return result
+
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        result.error = "hermes-vault secret-source fetch returned malformed JSON."
+        result.error_kind = ErrorKind.INTERNAL
+        return result
+
+    _apply_payload_to_result(payload, result)
+    if not result.secrets and result.error is None:
+        result.error = _first_issue_message(payload) or f"hermes-vault exited {proc.returncode} without usable secrets."
+        result.error_kind = _first_issue_kind(payload) or ErrorKind.INTERNAL
+    return result
+
+
+def _merge_fetch_result(target: FetchResult, source: FetchResult) -> None:
+    target.secrets.update(source.secrets)
+    target.warnings.extend(source.warnings)
+    if source.error and target.error is None:
+        target.error = source.error
+        target.error_kind = source.error_kind
+
+
+def _ref_service(ref: str) -> str:
+    parsed = urlparse(ref)
+    if parsed.scheme != "hv":
+        return ""
+    return (parsed.netloc + parsed.path).strip("/").lower()
 
 
 def _apply_payload_to_result(payload: dict[str, Any], result: FetchResult) -> None:
@@ -215,5 +282,18 @@ def _profile_passphrase_env_name(profile: str) -> str:
     return profile_passphrase_env_name(profile)
 
 
+def _refresh_secret_sources_after_registration() -> None:
+    """Re-run startup resolution now that late plugin discovery registered us."""
+    try:
+        from hermes_cli.env_loader import load_hermes_dotenv, reset_secret_source_cache
+
+        reset_secret_source_cache()
+        load_hermes_dotenv()
+    except Exception:
+        # Secret sources are fail-open by contract; startup must continue.
+        return
+
+
 def register(ctx):
     ctx.register_secret_source(HermesVaultSource())
+    _refresh_secret_sources_after_registration()

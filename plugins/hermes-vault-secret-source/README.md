@@ -7,6 +7,8 @@ It is intentionally small:
 
 - mapped mode only
 - `hv://service` and `hv://service?alias=name` refs only
+- generic aliases can be remapped to arbitrary Hermes env names, for example
+  `EXA_API_KEY: hv://generic?alias=exa`
 - no bulk export
 - no rotation or refresh
 - no write-back
@@ -56,6 +58,10 @@ hermes-vault --no-banner secret-source fetch --agent hermes --ttl 900 --format j
 
 It returns a Hermes `FetchResult`; Hermes itself applies values to
 `os.environ` according to Secret Source precedence rules.
+
+Because Hermes discovers third-party secret sources after its first dotenv
+load, registration performs one guarded cache reset and re-pull so credentials
+are available in the process that discovered the plugin.
 
 Empty values are omitted and never returned as secrets. If at least one mapped
 secret resolves successfully, other skipped refs become warnings. If no usable
