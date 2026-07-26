@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -70,12 +71,22 @@ class HermesVaultSource(SecretSource):
             for env_name, ref in generic_bindings
         )
 
+        deadline = time.monotonic() + timeout
         for remap_env, request_bindings in requests:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                partial = FetchResult(
+                    error=f"Hermes Vault fetch timed out before resolving {remap_env or 'mapped bindings'}.",
+                    error_kind=ErrorKind.TIMEOUT,
+                    binary_path=Path(binary),
+                )
+                _merge_fetch_result(result, partial)
+                continue
             partial = _fetch_bindings(
                 binary=binary,
                 agent=agent,
                 ttl=ttl,
-                timeout=timeout,
+                timeout=remaining,
                 allow_env=allow_env,
                 extra_env=extra_env,
                 bindings=request_bindings,
@@ -88,6 +99,10 @@ class HermesVaultSource(SecretSource):
                     warning.replace("HERMES_VAULT_SECRET", remap_env)
                     for warning in partial.warnings
                 ]
+                if partial.error:
+                    partial.error = partial.error.replace("HERMES_VAULT_SECRET", remap_env)
+                    if remap_env not in partial.error:
+                        partial.error = f"{remap_env}: {partial.error}"
             _merge_fetch_result(result, partial)
 
         if result.secrets:
@@ -113,7 +128,7 @@ class HermesVaultSource(SecretSource):
             "binary": {"description": "Path or executable name for hermes-vault.", "default": "hermes-vault"},
             "agent": {"description": "Hermes Vault policy agent used for get_env checks.", "default": "hermes"},
             "ttl_seconds": {"description": "TTL requested for policy evaluation.", "default": 900},
-            "timeout_seconds": {"description": "CLI invocation timeout.", "default": 30},
+            "timeout_seconds": {"description": "Wall-clock budget for the complete fetch.", "default": 30},
             "home": {"description": "Optional HERMES_VAULT_HOME for the child process.", "default": None},
             "policy": {"description": "Optional HERMES_VAULT_POLICY for the child process.", "default": None},
             "profile": {"description": "Optional HERMES_VAULT_PROFILE for the child process.", "default": None},
@@ -174,9 +189,12 @@ def _fetch_bindings(
 def _merge_fetch_result(target: FetchResult, source: FetchResult) -> None:
     target.secrets.update(source.secrets)
     target.warnings.extend(source.warnings)
-    if source.error and target.error is None:
-        target.error = source.error
-        target.error_kind = source.error_kind
+    if source.error:
+        if target.error is None:
+            target.error = source.error
+            target.error_kind = source.error_kind
+        else:
+            target.warnings.append(source.error)
 
 
 def _ref_service(ref: str) -> str:
@@ -286,9 +304,10 @@ def _refresh_secret_sources_after_registration() -> None:
     """Re-run startup resolution now that late plugin discovery registered us."""
     try:
         from hermes_cli.env_loader import load_hermes_dotenv, reset_secret_source_cache
+        from hermes_constants import get_hermes_home
 
         reset_secret_source_cache()
-        load_hermes_dotenv()
+        load_hermes_dotenv(hermes_home=get_hermes_home())
     except Exception:
         # Secret sources are fail-open by contract; startup must continue.
         return

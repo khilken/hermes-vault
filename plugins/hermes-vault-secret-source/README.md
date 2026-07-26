@@ -65,4 +65,6 @@ are available in the process that discovered the plugin.
 
 Empty values are omitted and never returned as secrets. If at least one mapped
 secret resolves successfully, other skipped refs become warnings. If no usable
-secret resolves, the plugin reports a machine-readable error kind.
+secret resolves, the plugin reports a machine-readable error kind. The
+`timeout_seconds` value is one wall-clock budget shared by the complete fetch,
+including all generic alias lookups.
