@@ -288,9 +288,15 @@ def temp_path_check(path: Path) -> bool:
             return False
     try:
         resolved = path.resolve()
-        return resolved.is_relative_to(Path("/tmp").resolve())
+        candidates = [Path("/tmp").resolve()]
+        tmpdir = os.environ.get("TMPDIR")
+        if tmpdir:
+            candidates.append(Path(tmpdir).resolve())
+        candidates.append(Path(tempfile.gettempdir()).resolve())
+        return any(resolved.is_relative_to(candidate) for candidate in candidates)
     except OSError:
-        return str(path).startswith("/tmp/")
+        raw = str(path)
+        return raw.startswith("/tmp/") or raw.startswith(str(tempfile.gettempdir()))
 
 
 def format_command(parts: tuple[str, ...] | list[str]) -> str:
