@@ -94,6 +94,69 @@ def test_uses_one_global_timeout_budget(monkeypatch, tmp_path: Path) -> None:
     assert timeouts == [5.0, 4.0, 2.0]
 
 
+def test_skips_generic_invocation_at_exact_deadline(monkeypatch, tmp_path: Path) -> None:
+    plugin = _load_plugin()
+    calls = []
+    ticks = iter([100.0, 101.0])
+    monkeypatch.setattr(plugin.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(plugin, "_fetch_bindings", lambda **kwargs: calls.append(kwargs))
+
+    result = plugin.HermesVaultSource().fetch(
+        {
+            "enabled": True,
+            "timeout_seconds": 1,
+            "env": {"FIRST_KEY": "hv://generic?alias=first"},
+        },
+        tmp_path,
+    )
+
+    assert calls == []
+    assert result.ok is False
+    assert result.error is not None
+    assert "FIRST_KEY" in result.error
+    assert "timed out" in result.error
+
+
+def test_all_generic_failures_retain_target_names_without_placeholder(monkeypatch, tmp_path: Path) -> None:
+    plugin = _load_plugin()
+
+    def fake_run(argv, **kwargs):
+        _env_name, ref = argv[-1].split("=", 1)
+        alias = ref.rsplit("=", 1)[-1]
+        return Proc(
+            json.dumps(
+                {
+                    "secrets": {},
+                    "warnings": {},
+                    "errors": {
+                        "HERMES_VAULT_SECRET": {
+                            "kind": "EMPTY_VALUE",
+                            "message": f"failed-{alias}",
+                        }
+                    },
+                }
+            ),
+            returncode=1,
+        )
+
+    monkeypatch.setattr(plugin, "run_secret_cli", fake_run)
+    result = plugin.HermesVaultSource().fetch(
+        {
+            "enabled": True,
+            "env": {
+                "FIRST_KEY": "hv://generic?alias=first",
+                "SECOND_KEY": "hv://generic?alias=second",
+            },
+        },
+        tmp_path,
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert "FIRST_KEY" in result.error
+    assert any("SECOND_KEY" in warning and "failed-second" in warning for warning in result.warnings)
+
+
 def test_refresh_uses_active_hermes_home(monkeypatch, tmp_path: Path) -> None:
     plugin = _load_plugin()
     calls = []
