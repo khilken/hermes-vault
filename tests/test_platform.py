@@ -188,6 +188,16 @@ def test_temp_path_check_posix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     assert _platform.temp_path_check(tmp_file.parent) is True
 
 
+def test_temp_path_check_posix_accepts_platform_tempdir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(_platform, "_is_windows", lambda: False)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    monkeypatch.setattr(_platform.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    assert _platform.temp_path_check(tmp_path / "hermes-vault") is True
+
+
 def test_temp_path_check_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_platform, "_is_windows", lambda: True)
 
