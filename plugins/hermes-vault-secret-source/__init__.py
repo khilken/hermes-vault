@@ -101,6 +101,8 @@ class HermesVaultSource(SecretSource):
                 ]
                 if partial.error:
                     partial.error = partial.error.replace("HERMES_VAULT_SECRET", remap_env)
+                    if remap_env not in partial.error:
+                        partial.error = f"{remap_env}: {partial.error}"
             _merge_fetch_result(result, partial)
 
         if result.secrets:

@@ -62,8 +62,8 @@ def test_preserves_all_generic_failures_as_warnings(monkeypatch, tmp_path: Path)
 
     assert result.ok is True
     assert result.secrets == {"FIRST_KEY": "value"}
-    assert any("failed-second" in warning for warning in result.warnings)
-    assert any("failed-third" in warning for warning in result.warnings)
+    assert any("SECOND_KEY" in warning and "failed-second" in warning for warning in result.warnings)
+    assert any("THIRD_KEY" in warning and "failed-third" in warning for warning in result.warnings)
 
 
 def test_uses_one_global_timeout_budget(monkeypatch, tmp_path: Path) -> None:
