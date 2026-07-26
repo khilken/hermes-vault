@@ -203,3 +203,44 @@ def test_plugin_does_not_mutate_os_environ(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert dict(plugin.os.environ) == before
+
+
+def test_plugin_remaps_generic_vault_secret_to_requested_env(monkeypatch, tmp_path: Path) -> None:
+    plugin = _load_plugin()
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return Proc(json.dumps({
+            "ok": True,
+            "secrets": {"HERMES_VAULT_SECRET": "tool-secret"},
+            "warnings": {},
+            "errors": {},
+        }))
+
+    monkeypatch.setattr(plugin, "run_secret_cli", fake_run)
+    result = plugin.HermesVaultSource().fetch(
+        {"enabled": True, "env": {"EXA_API_KEY": "hv://generic?alias=exa"}},
+        tmp_path,
+    )
+
+    assert result.ok is True
+    assert result.secrets == {"EXA_API_KEY": "tool-secret"}
+    assert calls[0][-1] == "HERMES_VAULT_SECRET=hv://generic?alias=exa"
+
+
+def test_register_refreshes_sources_after_late_plugin_discovery(monkeypatch) -> None:
+    plugin = _load_plugin()
+    registered = []
+    refreshed = []
+
+    class Ctx:
+        def register_secret_source(self, source):
+            registered.append(source)
+
+    monkeypatch.setattr(plugin, "_refresh_secret_sources_after_registration", lambda: refreshed.append(True))
+    plugin.register(Ctx())
+
+    assert len(registered) == 1
+    assert isinstance(registered[0], plugin.HermesVaultSource)
+    assert refreshed == [True]
